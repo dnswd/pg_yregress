@@ -1,0 +1,502 @@
+$schema: "https://raw.githubusercontent.com/omnigres/omnigres/master/pg_yregress/schema.json"
+
+name: pg_yregress
+
+instances:
+  main:
+    default: true
+  restarted:
+    init:
+    # This will be tested
+    - alter system set shared_buffers = '193MB'
+    - restart:
+  configured_text:
+    init:
+    # Test that we can init using usual test
+    - query: select tru
+      error: true
+    config: |
+      shared_buffers = '194MB'
+      log_connections = yes
+  configured_mapping:
+    config:
+      shared_buffers: 195MB
+      log_connections: yes
+  hba:
+    hba: |
+      local all all trust
+      host all all all trust
+  encoding_locale:
+    encoding: SQL_ASCII
+    locale: en_US.UTF-8
+
+tests:
+
+- name: simple query
+  query: select true as result
+  results:
+  - result: true
+
+- name: negative test
+  negative: true
+  query: select 0 as result
+  results:
+  - result: 1
+
+- name: boolean scalar
+  query: select true as t, false as f from generate_series(1,4)
+  results:
+  - t: true
+    f: false
+  - t: True
+    f: False
+  - t: on
+    f: off
+  - t: y
+    f: n
+
+- name: string shouldn't be misinterpreted as a boolean scalar
+  query: select 'true' as t
+  negative: true
+  results:
+  - t: on
+
+- name: failure
+  query: selec 1
+  error: true
+
+- name: error
+  query: selec 1
+  error:
+    severity: ERROR
+    message: syntax error at or near "selec"
+
+- name: error message literal
+  query: selec 1
+  error: syntax error at or near "selec"
+
+- name: error message detail
+  query: |
+    do $$
+    begin
+      raise exception 'custom error' using detail = 'custom detail';
+    end;
+    $$
+  error:
+    severity: ERROR
+    message: custom error
+    detail: custom detail
+
+# This test should not affect the one below, as it is wrapped
+# into a transaction by default
+- name: create a table
+  query: create table a()
+
+# See above
+- name: the table should not exist
+  query: select count(*) = 1 as exists from pg_class where relname = 'a'
+  results:
+  - exists: false
+
+- name: save value as anchor
+  query: select 1 as v
+  results:
+  - v: &v 1
+
+- name: use a reference to test against previously set value
+  query: select 1 as v
+  results:
+  - v: *v
+
+- name: query parameters
+  query: select $1 as v
+  params:
+  - &p text
+  results:
+  - v: *p
+
+- name: subtests
+  tests:
+  - create table subtests_table ()
+  - query: select * from subtests_table
+    error: relation "subtests_table" does not exist
+  - query: create table subtests_table ()
+    commit: true
+  - select * from subtests_table
+
+- name: multistep
+  steps:
+  - name: create table
+    query: create table tab as (select generate_series(1,10) as i);
+  - name: query table
+    query: select count(*) from tab
+    results:
+    - count: 10
+
+- name: multistep's table should not exist
+  query: select count(*) = 1 as exists from pg_class where relname = 'tab'
+  results:
+  - exists: false
+
+- name: nested multistep
+  steps:
+  - steps:
+    - query: create table nested_tab()
+  - query: select count(*) = 1 as exists from pg_class where relname = 'nested_tab'
+    results:
+    - exists: true
+
+- name: testing null
+  query: select null::integer as result
+  results:
+  - result: null
+
+- name: notices
+  query: |
+    do $$
+      begin
+        raise notice 'test 1';
+        raise notice 'test 2';
+      end;
+    $$ language plpgsql
+  notices:
+  - test 1
+  - test 2
+
+- name: multi-step notices
+  steps:
+  - query: |
+      do $$
+        begin
+          raise notice 'test 1';
+        end;
+      $$ language plpgsql
+  - query: |
+      do $$
+        begin
+          raise notice 'test 2';
+        end;
+      $$ language plpgsql
+  notices:
+  - test 1
+  - test 2
+
+- name: multi-step notices (individual)
+  steps:
+  - query: |
+      do $$
+        begin
+          raise notice 'test 1';
+        end;
+      $$ language plpgsql
+    notices:
+    - test 1
+  - query: |
+      do $$
+        begin
+          raise notice 'test 2';
+        end;
+      $$ language plpgsql
+    notices:
+    - test 2
+  # Ensure no notices get here
+  notices: [ ]
+
+- name: multi-step constraint trigger notices
+  steps:
+  - query: create table constraint_trigger_notices(id int)
+  - query: |
+      create function constraint_trigger_notices() returns trigger as $$
+      begin
+        raise notice 'raising notice %', new.id;
+        return new;
+      end;
+      $$ language plpgsql
+  - query: |
+      create constraint trigger constraint_trigger_notices after insert on constraint_trigger_notices
+      deferrable initially deferred
+      for each row execute function constraint_trigger_notices()
+    commit: true
+  - query: insert into constraint_trigger_notices values (1)
+    # Ensure no notices get here
+    notices: [ ]
+  - query: insert into constraint_trigger_notices values (2)
+    # Ensure no notices get here
+    notices: [ ]
+  commit: true
+  notices:
+  - raising notice 1
+  - raising notice 2
+
+- name: binary format
+  query: select true as value
+  binary: true
+  results:
+  - value: 0x01
+
+- name: binary format
+  query: select $1::bool as value
+  binary: true
+  params:
+  - 0x01
+  results:
+  - value: 0x01
+
+- name: binary format for params
+  query: select $1::bool as value
+  binary: params
+  params:
+  - 0x01
+  results:
+  - value: true
+
+- name: binary format for results
+  query: select $1::bool as value
+  binary: results
+  params:
+  - true
+  results:
+  - value: 0x01
+
+- name: non-hexadecimal binary format for params
+  query: select $1::text as value
+  binary: params
+  params:
+  # This is supplied as a binary, but it's not hex
+  - hello
+  results:
+  - value: hello
+
+- name: init restart
+  instance: restarted
+  query: select current_setting('shared_buffers')
+  results:
+  - current_setting: 193MB
+
+- name: configured (text)
+  instance: configured_text
+  query: |
+    select current_setting('shared_buffers') as shared_buffers,
+           current_setting('log_connections') as log_connections
+  results:
+  - shared_buffers: 194MB
+    log_connections: on
+
+- name: configured (mapping)
+  instance: configured_mapping
+  query: |
+    select current_setting('shared_buffers') as shared_buffers,
+           current_setting('log_connections') as log_connections
+  results:
+  - shared_buffers: 195MB
+    log_connections: on
+
+- name: env
+  query: select $1::text as user
+  params:
+  - */env/USER
+  results:
+  - user: */env/USER
+
+- name: restart
+  restart: true
+
+# Success test
+- select true
+# We are not testing this as it'll change the node type
+# - select tru
+
+- name: json and jsonb params
+  query: select $1::json as json, $2::jsonb as jsonb
+  params:
+  - hello: 1
+  - hello: 2
+  results:
+  - json:
+      hello: 1
+    jsonb:
+      hello: 2
+
+- name: json and jsonb results
+  query: select json_build_object('hello', 1), jsonb_build_object('hello', 2)
+  results:
+  - json_build_object:
+      hello: 1
+    jsonb_build_object:
+      hello: 2
+
+- name: committed query
+  query: create table this_table_will_exist()
+  commit: true
+
+- name: check committed query
+  query: table this_table_will_exist
+
+- name: committed steps
+  steps:
+  - query: create table committed_step1()
+    commit: true
+  - create table committed_step2()
+
+- name: commit uncommitted steps
+  steps:
+  - query: create table committed_step1_1()
+    commit: true
+  - create table committed_step1_2()
+  commit: true
+
+- name: nested committed steps
+  steps:
+  - steps:
+    - query: create table committed_step2_1()
+      commit: true
+    - query: create table committed_step2_2()
+      commit: false
+  commit: true
+
+- name: check committed steps
+  steps:
+  - table committed_step1
+  - query: table committed_step2
+    error: true
+  - table committed_step1_1
+  - table committed_step1_2
+  - table committed_step2_1
+  # this will work because nested transactions commit everything
+  - table committed_step2_2
+
+- name: skip
+  skip: reason
+  query: broken
+
+- name: skip (rich)
+  skip:
+    message: msg
+    details: details
+  query: broken
+
+- name: skip (bool)
+  skip: false
+  query: broken
+  error: true
+
+- name: skip (bool, true)
+  skip: true
+  query: broken
+
+- name: skip (without instruction)
+  skip: true
+
+- name: skip in steps
+  steps:
+  - skip: true
+  - select 1
+
+- name: todo
+  todo: true
+  query: broken
+
+- name: todo (reason)
+  todo: reason
+  query: broken
+
+- name: todo (bool)
+  todo: false
+  query: broken
+  error: true
+
+- name: todo (without instruction)
+  todo: true
+
+- name: todo (rich)
+  todo:
+    message: msg
+    details: details
+
+- name: todo in steps
+  steps:
+  - todo: true
+  - select 1
+
+- name: pg_hba configuration
+  instance: hba
+  query: select line_number, type, database, user_name, address, netmask, auth_method, options, error from pg_hba_file_rules
+  results:
+  - line_number: 1
+    type: local
+    database: "{all}"
+    user_name: "{all}"
+    address: null
+    netmask: null
+    auth_method: trust
+    options: null
+    error: null
+  - line_number: 2
+    type: host
+    database: "{all}"
+    user_name: "{all}"
+    address: all
+    netmask: null
+    auth_method: trust
+    options: null
+    error: null
+
+- name: reset test
+  tests:
+  - name: prepare for reset
+    query: select set_config('pg_yregress.test', 'yes', false)
+    commit: true
+
+  - name: before reset
+    query: select current_setting('pg_yregress.test')
+    results:
+    - current_setting: yes
+
+  - name: after reset
+    reset: true
+    query: select current_setting('pg_yregress.test', true)
+    results:
+    - current_setting: null
+
+- name: create database outside transaction
+  transaction: false
+  tests:
+  - query: create database another_db_success
+  - query: select datname from pg_database where datname = 'another_db_success'
+    results:
+    - datname: another_db_success
+  - name: connect to other database
+    query: select current_database()
+    database: another_db_success
+    results:
+    - current_database: another_db_success
+
+- name: create database in transaction fail
+  # transaction: true # default value of transaction
+  query: create database another_db_fail
+  error:
+    severity: ERROR
+    message: CREATE DATABASE cannot run inside a transaction block
+
+- name: default encoding and collation of instance
+  query: |
+    select
+       pg_catalog.pg_encoding_to_char(encoding) as encoding,
+       datcollate as collate
+    from pg_catalog.pg_database
+    where datname = current_database()
+  results:
+  - encoding: UTF8
+    collate: C
+
+- name: custom encoding and collation of instance
+  instance: encoding_locale
+  query: |
+    select
+       pg_catalog.pg_encoding_to_char(encoding) as encoding,
+       datcollate as collate
+    from pg_catalog.pg_database
+    where datname = current_database()
+  results:
+  - encoding: SQL_ASCII
+    collate: en_US.UTF-8

@@ -1,0 +1,7 @@
+INHERIT: ../mkdocs.base.yml
+site_name: pg_yregress
+
+nav:
+- Intro: 'intro.md'
+- Installation: 'install.md'
+- Usage: 'usage.md'
